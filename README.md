@@ -10,7 +10,7 @@ download your entire photobucket account.
 
 # usage
 ```bash
-git clone 'https://github.com/divinity76/photobucket-account-downloader.git' --depth 1
+git clone 'https://github.com/divinity76/photobucket-account-downloader.git' --depth 1;
 cd photobucket-account-downloader;
 echo 'login@email.com' > photobucket_username.txt;
 echo 'password' > photobucket_password.txt;
