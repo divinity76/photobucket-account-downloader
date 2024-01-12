@@ -1,0 +1,5 @@
+{
+    "require": {
+        "chrome-php/chrome": ">=1.10"
+    }
+}
