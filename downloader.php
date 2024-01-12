@@ -587,6 +587,7 @@ curl 'https://app.photobucket.com/api/graphql/v2' \
                 'title' => $image['title'],
                 'originalFilename' => $image['originalFilename'],
                 'originalImageURL' => $image['originalImage']['url'],
+                'uploadDate' => $image['uploadDate'],
                 'path' => $folder_data['path'] . '/' . $image['originalFilename'],
             );
         }
@@ -623,6 +624,13 @@ curl 'https://app.photobucket.com/api/graphql/v2' \
             if (strlen($data) !== file_put_contents($fullPath, $data, LOCK_EX)) {
                 unlink($fullPath);
                 throw new \Exception("Failed to write file $fullPath");
+            }
+            $uploadDate = strtotime($imageSimplified['uploadDate']);
+            if ($uploadDate === false) {
+                throw new \Exception("Failed to parse upload date '{$imageSimplified['uploadDate']}'");
+            }
+            if (!touch($fullPath, $uploadDate)) {
+                throw new \Exception("Failed to set upload date for $fullPath");
             }
         }
         curl_close($ch);
