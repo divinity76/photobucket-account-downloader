@@ -5,6 +5,7 @@ download your entire photobucket account.
 # requirements
 - git
 - php-cli >= 8  (7.4 might work, haven't tested, patches welcome)
+- php-sockets extension (trying to bypass it like `composer install --ignore-platform-req=ext-sockets` will not work.)
 - composer
 - Chromium or Google Chrome
 
