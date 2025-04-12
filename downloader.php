@@ -57,6 +57,7 @@ class Photobucket
     private $browser;
     private $page;
     private $internal_username; // May be different from login username
+    private $internal_bucket_id;
     function __construct()
     {
         $factory = new \HeadlessChromium\BrowserFactory();
@@ -64,6 +65,7 @@ class Photobucket
             [
                 'headless' => false,
                 'noSandbox' => true,
+                'sendSyncDefaultTimeout' => 10 * 1000,
                 'customFlags' => [
                     '--no-sandbox',
                     '--no-zygote',
@@ -85,7 +87,7 @@ class Photobucket
     ) {
         $page = &$this->page;
         $page->navigate('https://app.photobucket.com/login')->waitForNavigation(
-            \HeadlessChromium\Page::LOAD
+            \HeadlessChromium\Page::NETWORK_IDLE
         );
         $page->mouse()->find("#username")->click();
         $page->keyboard()->typeText($username);
@@ -93,236 +95,342 @@ class Photobucket
         $page->keyboard()->typeText($password);
         $page->evaluate('document.querySelector("button[type=submit]").click()')->getReturnValue();
         try {
-            $page->waitForReload(\HeadlessChromium\Page::DOM_CONTENT_LOADED, 10000);
+            $page->waitForReload(\HeadlessChromium\Page::NETWORK_IDLE, 10000);
         } catch (\Exception $e) {
             // ignore
         }
         // <div class="MuiAlert-message css-1xsto0d"><div class="MuiTypography-root MuiTypography-body1 MuiTypography-gutterBottom MuiAlertTitle-root jss20 jss21 css-vhidae">Error logging in</div>Invalid email/username or password</div>
         $error = $page->evaluate('document.querySelector(".MuiAlert-message")?.textContent')->getReturnValue();
+        uglyjump:
         if ($error) {
-            throw new Exception("Error logging in: $error");
+            echo ("Error logging in: $error");
+            echo "You probably hit a ReCaptcha challenge.\n";
+            echo "You must solve the ReCaptcha, log in manually, then press enter in this terminal.\n";
+            stream_set_blocking(STDIN, true);
+            var_dump(fgets(STDIN));
         }
-        // https://app.photobucket.com/u/4x4norway?planId=storage-monthly&login=true
-        $uri = $page->evaluate('document.location.href')->getReturnValue();
-        preg_match('#/u/([^?]+)#', $uri, $matches);
-        //$this->internal_username = urldecode($matches[1]);
-        $this->internal_username = $matches[1];
+        // JSON.parse(localStorage.getItem("__user_id"))
+        $code = 'JSON.parse(localStorage.getItem("__user_id"));';
+        $internal_username = $page->evaluate($code)->getReturnValue();
+        if (is_string($internal_username)) {
+            $internal_username = trim($internal_username);
+        }
+        if (empty($internal_username)) {
+            $error = "Failed to get internal username: $code -> " . var_export($internal_username, true);
+            goto uglyjump;
+            //throw new Exception("Failed to get internal username: $code -> " . var_export($internal_username, true));
+        }
+        $this->internal_username = $internal_username;
         echo "internal_username: {$this->internal_username}\n";
+        $code = 'document.querySelector("#appbar-current-bucket").href.match(/bucket\/([^\/]*)/)[1];';
+        $internal_bucket_id = $page->evaluate($code)->getReturnValue();
+        if (is_string($internal_bucket_id)) {
+            $internal_bucket_id = trim($internal_bucket_id);
+        }
+        if (empty($internal_bucket_id)) {
+            throw new Exception("Failed to get internal bucket id: $code -> " . var_export($internal_bucket_id, true));
+        }
+        echo "internal_bucket_id: {$internal_bucket_id}\n";
+        $this->internal_bucket_id = $internal_bucket_id;
     }
 
-    function getFolders(): array
+
+    function downloadEverything(): void
     {
         $ret = [];
         $page = &$this->page;
         // document.cookie 'cwr_u=; _gid=GA1.2.1666773935.1705050541; _fbp=fb.1.1705050541028.700942932; _tt_enable_cookie=1; _ttp=KsD1j70yQE35rPrmL8O1Mz0Zg1-; _pin_unauth=dWlkPVpEVTBPRFl3WldZdFpUVmhaaTAwTVRkaUxXRXlZbUV0TXpReFpEUmtNMkkyT1dObA; __hstc=35533630.673d82828e43783dc135d49f531c15a7.1705050543222.1705050543222.1705050543222.1; hubspotutk=673d82828e43783dc135d49f531c15a7; __hssrc=1; _gcl_au=1.1.714453139.1705050541.1346485070.1705050543.1705050543; app_auth=eyJhbGciOiJSUzI1NiIsImtpZCI6IjdjZjdmODcyNzA5MWU0Yzc3YWE5OTVkYjYwNzQzYjdkZDJiYjcwYjUiLCJ0eXAiOiJKV1QifQ.eyJuYW1lIjoiSGFucyBIZW5yaWsgQmVyZ2FuIiwicGljdHVyZSI6Imh0dHBzOi8vbGgzLmdvb2dsZXVzZXJjb250ZW50LmNvbS9hL0FHTm15eFlSX1drd1MtbV9WUjZLQUlSRWJUeWZUT2E5NGh0QVlGMGVORjZIPXM5Ni1jIiwiaXNHcm91cFVzZXIiOnRydWUsInBhc3N3b3JkRXhwaXJlZCI6ZmFsc2UsImlzcyI6Imh0dHBzOi8vc2VjdXJldG9rZW4uZ29vZ2xlLmNvbS9waG90b2J1Y2tldC1tb2JpbGUtYXBwcyIsImF1ZCI6InBob3RvYnVja2V0LW1vYmlsZS1hcHBzIiwiYXV0aF90aW1lIjoxNzA1MDUwNTQzLCJ1c2VyX2lkIjoiNHg0bm9yd2F5Iiwic3ViIjoiNHg0bm9yd2F5IiwiaWF0IjoxNzA1MDUwNTQzLCJleHAiOjE3MDUwNTQxNDMsImVtYWlsIjoiZGl2aW5pdHk3NkBnbWFpbC5jb20iLCJlbWFpbF92ZXJpZmllZCI6dHJ1ZSwiZmlyZWJhc2UiOnsiaWRlbnRpdGllcyI6eyJlbWFpbCI6WyJkaXZpbml0eTc2QGdtYWlsLmNvbSJdfSwic2lnbl9pbl9wcm92aWRlciI6ImN1c3RvbSJ9fQ.ffaGZ_cyh10xLVGo1KOD5NvWxwGpIRIS8521G-iKYX5kwF8kvnXGl_TJXI63sPamHkVODHGCmoVl143N7u-rOILfEMOuJsLWWCkc0TUp-KdnwffX__seGh4QuKg4gWN7jjU7tmRXIVGbPkk_0jaeciulM2-YtzlUR0AvDZ_O7LrPTUueaCJxTpiQd1q5fgyyvxqxQPysX9QkANkcvRNLBFO7D0DCmgg2aJdb-c5QPzgWTdao1kp9TMmRUh8EbzR43pS8ZCZR_KQXNs52MnI8o6e-9omyrvIgjKelznlx9IenZIR0jQd4US6TCtIkSnI8hizpm2vdEloCLTCZIOMTEg; _uetsid=39b43650b12a11eebf3d1b2e4684110f; _uetvid=39b42640b12a11eea19de38ab0318a25; _ga=GA1.2.1556083939.1705050541; _ga_Y2Z30LCFMB=GS1.1.1705050540.1.1.1705050546.54.0.0; __hssc=35533630.3.1705050543222'
         // /app_auth=([^;]+)/.exec(document.cookie)[1]
         // https://app.photobucket.com/u/4x4norway/albums
-        $page->navigate("https://app.photobucket.com/u/{$this->internal_username}/albums")->waitForNavigation(
-            \HeadlessChromium\Page::DOM_CONTENT_LOADED
-        );
-        $authToken = $page->evaluate('/app_auth=([^;]+)/.exec(document.cookie)[1]')->getReturnValue();
-        $postData = array(
-            'operationName' => 'AlbumsReadAll',
-            'variables' => array(
-                'sortBy' => array(
-                    'desc' => false,
-                ),
-            ),
-            'query' => 'query AlbumsReadAll($sortBy: Sorter!) {
-                albumsReadAll(sortBy: $sortBy) {
-                    ...AlbumFragment
-                    __typename
-                }
-            }
-        
-            fragment AlbumFragment on AlbumV2 {
-                id
-                title
-                privacyMode
-                parentAlbumId
-                description
-                owner
-                counters {
-                    imageCountIncludeSubAlbums
-                    imageCount
-                    nestedAlbumsCount
-                    __typename
-                }
-                __typename
-            }',
-        );
-        $js = 'xhr= new XMLHttpRequest();
-        xhr.open("POST", "https://app.photobucket.com/api/graphql/v2", false);
-        xhr.setRequestHeader("Content-Type", "application/json");
-        xhr.setRequestHeader("authorization", ' . json_encode($authToken, JSON_THROW_ON_ERROR) . ');
-        xhr.send(' . json_encode(json_encode($postData, JSON_THROW_ON_ERROR), JSON_THROW_ON_ERROR) . ');
-        xhr.responseText;';
-        $ret = $page->evaluate($js)->getReturnValue();
-        $ret = json_decode($ret, true, 512, JSON_THROW_ON_ERROR);
-        if (false) {
-            $ret = array(
-                'data' =>
-                array(
-                    'albumsReadAll' =>
-                    array(
-                        0 =>
-                        array(
-                            'id' => 'b650a0d5-9ea6-41ed-a464-8868011b50ff',
-                            'title' => 'ForumPhotos',
-                            'privacyMode' => 'PUBLIC',
-                            'parentAlbumId' => '197268f5-6144-4870-a9ba-f920959db4d1',
-                            'description' => NULL,
-                            'owner' => '4x4norway',
-                            'counters' =>
-                            array(
-                                'imageCountIncludeSubAlbums' => 6602,
-                                'imageCount' => 0,
-                                'nestedAlbumsCount' => 3,
-                                '__typename' => 'AlbumCounters',
-                            ),
-                            '__typename' => 'AlbumV2',
-                        ),
-                        1 =>
-                        array(
-                            'id' => '16d33369-89af-437b-a38d-c13111b39a1b',
-                            'title' => 'Vikingtreff 2012',
-                            'privacyMode' => 'PUBLIC',
-                            'parentAlbumId' => '197268f5-6144-4870-a9ba-f920959db4d1',
-                            'description' => NULL,
-                            'owner' => '4x4norway',
-                            'counters' =>
-                            array(
-                                'imageCountIncludeSubAlbums' => 211,
-                                'imageCount' => 211,
-                                'nestedAlbumsCount' => 0,
-                                '__typename' => 'AlbumCounters',
-                            ),
-                            '__typename' => 'AlbumV2',
-                        ),
-                        14 =>
-                        array(
-                            'id' => '825b0d58-79e8-4b43-870c-48c4fb4f2368',
-                            'title' => 'Mobile Uploads',
-                            'privacyMode' => 'PRIVATE',
-                            'parentAlbumId' => '197268f5-6144-4870-a9ba-f920959db4d1',
-                            'description' => NULL,
-                            'owner' => '4x4norway',
-                            'counters' =>
-                            array(
-                                'imageCountIncludeSubAlbums' => 0,
-                                'imageCount' => 0,
-                                'nestedAlbumsCount' => 0,
-                                '__typename' => 'AlbumCounters',
-                            ),
-                            '__typename' => 'AlbumV2',
-                        ),
-                        15 =>
-                        array(
-                            'id' => '197268f5-6144-4870-a9ba-f920959db4d1',
-                            'title' => 'My Bucket',
-                            'privacyMode' => 'PUBLIC',
-                            'parentAlbumId' => NULL,
-                            'description' => NULL,
-                            'owner' => '4x4norway',
-                            'counters' =>
-                            array(
-                                'imageCountIncludeSubAlbums' => 9830,
-                                'imageCount' => 23,
-                                'nestedAlbumsCount' => 18,
-                                '__typename' => 'AlbumCounters',
-                            ),
-                            '__typename' => 'AlbumV2',
-                        ),
-                        16 =>
-                        array(
-                            'id' => '706bbe20-ad5c-402f-964b-b51d8b714c40',
-                            'title' => 'FORUMFOLDER1',
-                            'privacyMode' => 'PUBLIC',
-                            'parentAlbumId' => 'b650a0d5-9ea6-41ed-a464-8868011b50ff',
-                            'description' => NULL,
-                            'owner' => '4x4norway',
-                            'counters' =>
-                            array(
-                                'imageCountIncludeSubAlbums' => 2156,
-                                'imageCount' => 2156,
-                                'nestedAlbumsCount' => 0,
-                                '__typename' => 'AlbumCounters',
-                            ),
-                            '__typename' => 'AlbumV2',
-                        ),
-                        17 =>
-                        array(
-                            'id' => '4eb3753d-6d35-4723-87bc-2385edf45fe0',
-                            'title' => 'FORUMFOLDER2',
-                            'privacyMode' => 'PUBLIC',
-                            'parentAlbumId' => 'b650a0d5-9ea6-41ed-a464-8868011b50ff',
-                            'description' => NULL,
-                            'owner' => '4x4norway',
-                            'counters' =>
-                            array(
-                                'imageCountIncludeSubAlbums' => 2088,
-                                'imageCount' => 2088,
-                                'nestedAlbumsCount' => 0,
-                                '__typename' => 'AlbumCounters',
-                            ),
-                            '__typename' => 'AlbumV2',
-                        ),
-                        18 =>
-                        array(
-                            'id' => '22fe5b2c-464e-4417-b6e2-a3a99b067799',
-                            'title' => 'FORUMFOLDER3',
-                            'privacyMode' => 'PUBLIC',
-                            'parentAlbumId' => 'b650a0d5-9ea6-41ed-a464-8868011b50ff',
-                            'description' => NULL,
-                            'owner' => '4x4norway',
-                            'counters' =>
-                            array(
-                                'imageCountIncludeSubAlbums' => 2358,
-                                'imageCount' => 2358,
-                                'nestedAlbumsCount' => 0,
-                                '__typename' => 'AlbumCounters',
-                            ),
-                            '__typename' => 'AlbumV2',
-                        ),
-                    ),
-                ),
+        if (0) {
+            $page->navigate("https://app.photobucket.com/u/{$this->internal_username}/albums")->waitForNavigation(
+                \HeadlessChromium\Page::DOM_CONTENT_LOADED
             );
         }
-        $folders = (function () use ($ret): array {
-            $foldersSimplified = array();
-            foreach ($ret['data']['albumsReadAll'] as $folder) {
-                $foldersSimplified[] = array(
-                    'id' => $folder['id'],
-                    'title' => $folder['title'],
-                    'privacyMode' => $folder['privacyMode'],
-                    'parentAlbumId' => $folder['parentAlbumId'] ?? null,
-                    'description' => $folder['description'],
-                    'owner' => $folder['owner'],
-                    'counters' => $folder['counters'],
-                );
+        $get_path_of_album_id = function (?string $album_id): string {
+            $ret = __DIR__ . DIRECTORY_SEPARATOR . "downloads" . DIRECTORY_SEPARATOR;
+            if ($album_id === null) {
+                return $ret . "no_album_id" . DIRECTORY_SEPARATOR;
             }
-            foreach ($foldersSimplified as &$folderSimplified) {
-                $path = '';
-                if (empty($folderSimplified['parentAlbumId'])) {
-                    $path = '/' . $folderSimplified['title'];
-                } else {
-                    $path = '/' . $folderSimplified['title'];
-                    $parent = $folderSimplified['parentAlbumId'];
-                    while (!empty($parent)) {
-                        $parentFolder = array_filter($foldersSimplified, function ($folder) use ($parent) {
-                            return $folder['id'] == $parent;
-                        });
-                        $parentFolder = array_shift($parentFolder);
-                        $path = '/' . $parentFolder['title'] . $path;
-                        $parent = $parentFolder['parentAlbumId'];
+            // TODO: implement this
+            // Photobucket made major changes to how folders/directories/paths are handled, and 
+            // I don't have time to figure it out right now.
+            return $ret . "todo_fix_path_of_album_id_$album_id" . DIRECTORY_SEPARATOR;
+        };
+        $get_images_of_bucket_id = function (string $bucket_id) use (&$page): array {
+            $duplicateUrlList = [];
+            $extractedImages = [];
+            $iteration = 0;
+            $nextToken = "";
+            for (;;) {
+                ++$iteration;
+                $authToken = $page->evaluate('/app_auth=([^;]+)/.exec(document.cookie)[1]')->getReturnValue();
+                $url = "https://app.photobucket.com/api/graphql/v2";
+                $headers = array(
+                    "apollographql-client-name" => "photobucket-web",
+                    "apollographql-client-version" => "1.282.0",
+                    "authorization" => $authToken,
+                    "content-type" => "application/json",
+                    // ignore: "x-amzn-trace-id": "Root=1-67fa629b-89a5f0674486adea4229805f;Parent=ae191bcc73df5def;Sampled=1",
+                    // ignore: "x-correlation-id": "4c67becd-b07e-4b0a-a89f-bae39150882a"
+                );
+                $body = array(
+                    'operationName' => 'BucketMediaByAlbumId',
+                    'variables' =>
+                    array(
+                        'limit' => 1000,
+                        'bucketId' => $bucket_id,
+                        'filterBy' => NULL,
+                        'sortBy' =>
+                        array(
+                            'order' => 'DESC',
+                            'field' => 'DATE_TAKEN',
+                        ),
+                        'nextToken' => $nextToken, // 'eyJpZCI6ImNiN2VhZGYyLTJkYTItNDkwNC1hMzRjLWIyNzJiYmM3OGZlMiIsImJ1Y2tldElkIjoiM2QyYTAyY2EtMzNlMi00MjkyLWE3MmYtZmM2NWRkYWIzNTZiIiwic3RhdHVzVHlwZVNLIjoiQUNUSVZFI01FRElBIzIwMTAtMTItMjRUMDM6MjA6MjguMDAwWiJ9',
+                    ),
+                    'query' => 'query BucketMediaByAlbumId($bucketId: ID!, $albumId: ID, $limit: Int! = 40, $nextToken: String, $filterBy: BucketMediaFilter, $sortBy: BucketMediaSorter) {
+                bucketMediaByAlbumId(
+                  bucketId: $bucketId
+                  albumId: $albumId
+                  limit: $limit
+                  nextToken: $nextToken
+                  filterBy: $filterBy
+                  sortBy: $sortBy
+                ) {
+                  items {
+                    ...BucketMediaFragment
+                    __typename
+                  }
+                  nextToken
+                  __typename
+                }
+              }
+              
+              fragment BucketMediaFragment on BucketMedia {
+                albumId
+                bucketId
+                createdAt
+                dateTaken
+                description
+                filename
+                fileSize
+                height
+                id
+                imageUrl
+                isBanned
+                isVideo
+                mediaType
+                scheduledDeletionAt
+                originalFilename
+                title
+                userId
+                userTags
+                width
+                isBanned
+                isFavorite
+                __typename
+              }',
+                );
+                $js = 'xhr= new XMLHttpRequest();' . "\n";
+                $encode = function ($data): string {
+                    return json_encode($data, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+                };
+                $js .= 'xhr.open("POST", ' . $encode($url) . ', false);' . "\n";
+                foreach ($headers as $key => $value) {
+                    $js .= 'xhr.setRequestHeader(' . $encode($key) . ', ' . $encode($value) . ');' . "\n";
+                }
+                $js .= 'xhr.send(' . $encode($encode($body)) . ');' . "\n";
+                $js .= 'xhr.responseText;';
+                echo "sending: $js\niteration: $iteration\nresults-so-far: " . count($extractedImages) . "\n";
+                $parsed = $page->evaluate($js)->getReturnValue();
+                $parsed = json_decode($parsed, true, 512, JSON_THROW_ON_ERROR);
+                if (false) {
+                    $parsed = array(
+                        'data' =>
+                        array(
+                            'bucketMediaByAlbumId' =>
+                            array(
+                                'items' =>
+                                array(
+                                    0 =>
+                                    array(
+                                        'albumId' => 'e617f4e9-d2f9-4b2c-91e4-38e17e383552',
+                                        'bucketId' => '3d2a02ca-33e2-4292-a72f-fc65ddab356b',
+                                        'createdAt' => '2010-12-24T03:20:27.000Z',
+                                        'dateTaken' => '2010-12-24T03:20:27.000Z',
+                                        'description' => NULL,
+                                        'filename' => '11778e47-d2ee-4c3b-b78d-74169ad33324.png',
+                                        'fileSize' => 679,
+                                        'height' => 32,
+                                        'id' => '11778e47-d2ee-4c3b-b78d-74169ad33324',
+                                        'imageUrl' => 'https://hosting.photobucket.com/3d2a02ca-33e2-4292-a72f-fc65ddab356b/11778e47-d2ee-4c3b-b78d-74169ad33324.png',
+                                        'isBanned' => false,
+                                        'isVideo' => false,
+                                        'mediaType' => 'image/png',
+                                        'scheduledDeletionAt' => NULL,
+                                        'originalFilename' => '22171002.png',
+                                        'title' => '22171002',
+                                        'userId' => 'msmeovv',
+                                        'userTags' => NULL,
+                                        'width' => 32,
+                                        'isFavorite' => false,
+                                        '__typename' => 'BucketMedia',
+                                    ),
+                                    1 =>
+                                    array(
+                                        'albumId' => 'e617f4e9-d2f9-4b2c-91e4-38e17e383552',
+                                        'bucketId' => '3d2a02ca-33e2-4292-a72f-fc65ddab356b',
+                                        'createdAt' => '2010-12-24T03:20:26.000Z',
+                                        'dateTaken' => '2010-12-24T03:20:26.000Z',
+                                        'description' => NULL,
+                                        'filename' => 'eeac5c02-7db3-45d7-bc65-0defd92855bf.gif',
+                                        'fileSize' => 115716,
+                                        'height' => 243,
+                                        'id' => 'eeac5c02-7db3-45d7-bc65-0defd92855bf',
+                                        'imageUrl' => 'https://hosting.photobucket.com/3d2a02ca-33e2-4292-a72f-fc65ddab356b/eeac5c02-7db3-45d7-bc65-0defd92855bf.gif',
+                                        'isBanned' => false,
+                                        'isVideo' => false,
+                                        'mediaType' => 'image/gif',
+                                        'scheduledDeletionAt' => NULL,
+                                        'originalFilename' => '22171000affected.gif',
+                                        'title' => '22171000affected',
+                                        'userId' => 'msmeovv',
+                                        'userTags' => NULL,
+                                        'width' => 234,
+                                        'isFavorite' => false,
+                                        '__typename' => 'BucketMedia',
+                                    ),
+                                    2 =>
+                                    array(
+                                        'albumId' => 'e617f4e9-d2f9-4b2c-91e4-38e17e383552',
+                                        'bucketId' => '3d2a02ca-33e2-4292-a72f-fc65ddab356b',
+                                        'createdAt' => '2010-12-24T03:20:25.000Z',
+                                        'dateTaken' => '2010-12-24T03:20:25.000Z',
+                                        'description' => NULL,
+                                        'filename' => '9612d68d-54fb-4993-a281-e1719b5ec1e5.png',
+                                        'fileSize' => 669,
+                                        'height' => 32,
+                                        'id' => '9612d68d-54fb-4993-a281-e1719b5ec1e5',
+                                        'imageUrl' => 'https://hosting.photobucket.com/3d2a02ca-33e2-4292-a72f-fc65ddab356b/9612d68d-54fb-4993-a281-e1719b5ec1e5.png',
+                                        'isBanned' => false,
+                                        'isVideo' => false,
+                                        'mediaType' => 'image/png',
+                                        'scheduledDeletionAt' => NULL,
+                                        'originalFilename' => '22171000.png',
+                                        'title' => '22171000',
+                                        'userId' => 'msmeovv',
+                                        'userTags' => NULL,
+                                        'width' => 32,
+                                        'isFavorite' => false,
+                                        '__typename' => 'BucketMedia',
+                                    ),
+                                    3 =>
+                                    array(
+                                        'albumId' => 'e617f4e9-d2f9-4b2c-91e4-38e17e383552',
+                                        'bucketId' => '3d2a02ca-33e2-4292-a72f-fc65ddab356b',
+                                        'createdAt' => '2010-12-24T03:20:24.000Z',
+                                        'dateTaken' => '2010-12-24T03:20:24.000Z',
+                                        'description' => NULL,
+                                        'filename' => '9be06988-71cd-4404-b741-bc8a21d74020.png',
+                                        'fileSize' => 548,
+                                        'height' => 32,
+                                        'id' => '9be06988-71cd-4404-b741-bc8a21d74020',
+                                        'imageUrl' => 'https://hosting.photobucket.com/3d2a02ca-33e2-4292-a72f-fc65ddab356b/9be06988-71cd-4404-b741-bc8a21d74020.png',
+                                        'isBanned' => false,
+                                        'isVideo' => false,
+                                        'mediaType' => 'image/png',
+                                        'scheduledDeletionAt' => NULL,
+                                        'originalFilename' => '22170001.png',
+                                        'title' => '22170001',
+                                        'userId' => 'msmeovv',
+                                        'userTags' => NULL,
+                                        'width' => 32,
+                                        'isFavorite' => false,
+                                        '__typename' => 'BucketMedia',
+                                    ),
+                                    // etc 40 items
+                                ),
+                                'nextToken' => 'eyJpZCI6ImY5NmJiOTA4LWQ4Y2EtNDgxZS05ZWFhLTA5NmEwZDkwNWQ5YSIsImJ1Y2tldElkIjoiM2QyYTAyY2EtMzNlMi00MjkyLWE3MmYtZmM2NWRkYWIzNTZiIiwic3RhdHVzVHlwZVNLIjoiQUNUSVZFI01FRElBIzIwMTAtMTItMjRUMDM6MDE6MTcuMDAwWiJ9',
+                                '__typename' => 'BucketMediaResults',
+                            ),
+                        ),
+                    );
+                }
+                foreach ($parsed['data']['bucketMediaByAlbumId']['items'] as $item) {
+                    $url = $item['imageUrl'];
+                    if (isset($duplicateUrlList[$url])) {
+                        continue;
+                    }
+                    $duplicateUrlList[$url] = true;
+                    $extractedImages[] = [
+                        "imageUrl" => $item['imageUrl'],
+                        "dateTaken" => $item['dateTaken'],
+                        "albumId" => $item['albumId'], // need it to find the folder path in the future..
+                        "originalFilename" => $item['originalFilename'],
+                    ];
+                }
+                $nextToken = $parsed['data']['bucketMediaByAlbumId']['nextToken'] ?? "";
+                if (empty($nextToken)) {
+                    return $extractedImages;
+                }
+            }
+        };
+        $images = $get_images_of_bucket_id($this->internal_bucket_id);
+        $downloader_ch = curl_init();
+        curl_setopt_array($downloader_ch, array(
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_TIMEOUT => 10,
+            CURLOPT_CONNECTTIMEOUT => 5,
+            CURLOPT_USERAGENT => "curl/" . curl_version()['version'],
+            CURLOPT_ENCODING => "",
+        ));
+        foreach ($images as $image) {
+            var_dump($image);
+            $path = $get_path_of_album_id($image['albumId']);
+            if (!is_dir($path)) {
+                if (!mkdir($path, 0777, true)) {
+                    throw new Exception("Failed to create directory: $path - " . var_export(error_get_last(), true));
+                }
+                // set creation/modification time to the date taken
+                $date = strtotime($image['dateTaken']);
+                if ($date === false) {
+                    throw new Exception("Failed to parse date: {$image['dateTaken']}");
+                }
+                if (!touch($path, $date, $date)) {
+                    throw new Exception("Failed to set date on directory: $path - " . var_export(error_get_last(), true));
+                }
+            }
+            $filepath = $path . DIRECTORY_SEPARATOR . $image['originalFilename'];
+            if (file_exists($filepath)) {
+                // because we haven't gotten folder code working yet, duplicate filenames are possible
+                for ($i = 0; ++$i;) {
+                    $new_filepath = $path . "/" . $i . "_" . $image['originalFilename'];
+                    if (!file_exists($new_filepath)) {
+                        $filepath = $new_filepath;
+                        break;
+                    }
+                    if ($i > 9999) {
+                        throw new Exception("Failed to find unique filename: $filepath - " . var_export(error_get_last(), true));
                     }
                 }
-                $folderSimplified['path'] = $path;
             }
-            unset($folderSimplified);
-            return $foldersSimplified;
-        })();
-        return $folders;
+            $url = $image['imageUrl'];
+            echo "Downloading $url to $filepath\n";
+            curl_setopt($downloader_ch, CURLOPT_URL, $url);
+            $binary = curl_exec($downloader_ch);
+            if (curl_errno($downloader_ch)) {
+                throw new Exception("Failed to download image: $url: " . curl_errno($downloader_ch) . ": " . curl_error($downloader_ch) . " - " . curl_strerror(curl_errno($downloader_ch)));
+            }
+            file_put_contents($filepath, $binary, LOCK_EX);
+            $date = strtotime($image['dateTaken']);
+            if ($date === false) {
+                throw new Exception("Failed to parse date: {$image['dateTaken']}");
+            }
+            if (!touch($filepath, $date, $date)) {
+                throw new Exception("Failed to set date on file: $filepath - " . var_export(error_get_last(), true));
+            }
+        }
     }
     function downloadFolder(array $folder_data)
     {
@@ -640,8 +748,82 @@ curl 'https://app.photobucket.com/api/graphql/v2' \
 $photobucket = new Photobucket();
 $photobucket->login($username, $password);
 echo "Logged in\n";
+$photobucket->downloadEverything();
+die("TODO: fix folders again :( photobucket made major changes to folder APIs and i don't have time/motivation to fix it :(");
 $folders = $photobucket->getFolders();
 foreach ($folders as $folders) {
     var_export($folders);
     $photobucket->downloadFolder($folders);
+}
+// Usage: EvalLoop([...get_defined_vars(), "xthis" => $this]);
+function EvalLoop($vars)
+{
+    // Import variables into local scope.
+    extract($vars);
+
+    // Print invocation details.
+    $trace = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 2);
+    if (isset($trace[1])) {
+        $caller = $trace[1];
+        $file = isset($caller['file']) ? $caller['file'] : 'Unknown file';
+        $line = isset($caller['line']) ? $caller['line'] : 'Unknown line';
+        echo "EvalLoop invoked from: File: {$file}, Line: {$line}" . PHP_EOL;
+    } else {
+        echo "EvalLoop invoked directly (no caller information available)." . PHP_EOL;
+    }
+
+    // Print the available variables.
+    echo "Available Variables:" . PHP_EOL;
+    foreach ($vars as $key => $value) {
+        $type = is_object($value) ? get_class($value) : gettype($value);
+        echo " - {$key}: {$type}" . PHP_EOL;
+    }
+    echo str_repeat('-', 40) . PHP_EOL;
+    echo "Type 'exit' to quit the evaluation loop." . PHP_EOL;
+
+    $code = "";
+    while (true) {
+        // Read input lines until an empty line is encountered.
+        while (true) {
+            $tmp = readline('> ');
+            if ($tmp === false) {
+                // Break out if readline returns false (for example, on CTRL+D).
+                break 2;
+            }
+            $tmp = trim($tmp);
+            readline_add_history($tmp);
+
+            // If an empty line, stop reading further for this statement.
+            if ($tmp === '') {
+                break;
+            }
+            $code .= $tmp . "\n";
+
+            // If this line ends with a semicolon, assume end of statement.
+            if (str_ends_with($tmp, ';')) {
+                break;
+            }
+        }
+
+        $code = trim($code);
+        if ($code === 'exit') {
+            echo "Exiting EvalLoop." . PHP_EOL;
+            break;
+        }
+
+        echo "Evaluating:" . PHP_EOL . $code . PHP_EOL;
+        try {
+            // Evaluate the code and capture the result.
+            $result = eval($code);
+            echo "Result: ";
+            var_dump($result);
+        } catch (Throwable $ex) {
+            echo "Error during evaluation:" . PHP_EOL;
+            var_dump($ex);
+        }
+
+        // Reset code for the next iteration.
+        $code = "";
+        echo str_repeat('-', 40) . PHP_EOL;
+    }
 }
