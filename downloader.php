@@ -64,6 +64,7 @@ class Photobucket
         $browser = $factory->createBrowser(
             [
                 'headless' => false,
+                'ignoreCertificateErrors' => true,
                 'noSandbox' => true,
                 'sendSyncDefaultTimeout' => 10 * 1000,
                 'customFlags' => [
@@ -384,6 +385,9 @@ class Photobucket
             CURLOPT_CONNECTTIMEOUT => 5,
             CURLOPT_USERAGENT => "curl/" . curl_version()['version'],
             CURLOPT_ENCODING => "",
+            CURLOPT_SSL_VERIFYHOST => false,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYSTATUS => false,
         ));
         foreach ($images as $image) {
             var_dump($image);
@@ -401,7 +405,7 @@ class Photobucket
                     throw new Exception("Failed to set date on directory: $path - " . var_export(error_get_last(), true));
                 }
             }
-            $filepath = $path . DIRECTORY_SEPARATOR . $image['originalFilename'];
+            $filepath = $path . $image['originalFilename'];
             if (file_exists($filepath)) {
                 // because we haven't gotten folder code working yet, duplicate filenames are possible
                 for ($i = 0; ++$i;) {
@@ -710,6 +714,9 @@ curl 'https://app.photobucket.com/api/graphql/v2' \
             CURLOPT_FOLLOWLOCATION => true,
             CURLOPT_ENCODING => '',
             CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_SSL_VERIFYHOST => false,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYSTATUS => false,
         ));
         foreach ($imagesSimplified as $imageSimplified) {
             echo "Downloading {$imageSimplified['path']}\n";
